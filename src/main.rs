@@ -38,6 +38,7 @@ enum Command {
     Compress(CompressArgs),
     Decompress(IoArgs),
     Roundtrip(CompressArgs),
+    InspectZpaq(InspectArgs),
 }
 
 #[derive(Debug, Args)]
@@ -73,6 +74,12 @@ struct CompressArgs {
     table_log: u8,
 }
 
+#[derive(Debug, Args)]
+struct InspectArgs {
+    #[arg(short, long)]
+    input: PathBuf,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(&cli)?;
@@ -81,6 +88,7 @@ fn main() -> Result<()> {
         Command::Compress(args) => run_compress(&args),
         Command::Decompress(args) => run_decompress(&args),
         Command::Roundtrip(args) => run_roundtrip(&args),
+        Command::InspectZpaq(args) => run_inspect_zpaq(&args),
     }
 }
 
@@ -194,5 +202,28 @@ fn init_tracing(cli: &Cli) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn run_inspect_zpaq(args: &InspectArgs) -> Result<()> {
+    let blocks = zpars::inspect_zpaq_file(&args.input)?;
+    info!(count = blocks.len(), input = %args.input.display(), "zpaq blocks detected");
+    for (idx, b) in blocks.iter().enumerate() {
+        println!(
+            "block={idx} offset={} level={} type={} hsize={} hh={} hm={} ph={} pm={} comps={} comp_bytes={} hcomp_bytes={} segment_offset={}",
+            b.start_offset,
+            b.level,
+            b.zpaql_type,
+            b.hsize,
+            b.hh,
+            b.hm,
+            b.ph,
+            b.pm,
+            b.n_components,
+            b.comp_bytes,
+            b.hcomp_bytes,
+            b.segment_offset
+        );
+    }
     Ok(())
 }
