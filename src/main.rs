@@ -4,9 +4,12 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
+use tar::Archive;
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 use zpars::{CompressionOptions, DecompressionOptions};
+
+const DIR_WRAP_MAGIC: &[u8] = b"ZPARS_DIR_TAR_V1\0";
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum LogFormat {
@@ -51,6 +54,9 @@ struct IoArgs {
 
     #[arg(short, long)]
     output: PathBuf,
+
+    #[arg(long, default_value_t = false)]
+    raw: bool,
 }
 
 #[derive(Debug, Args)]
@@ -145,15 +151,41 @@ fn run_decompress(args: &IoArgs) -> Result<()> {
 
     let input = File::open(&args.input)
         .with_context(|| format!("opening input file {}", args.input.display()))?;
-    let output = File::create(&args.output)
-        .with_context(|| format!("creating output file {}", args.output.display()))?;
-
     let mut reader = BufReader::new(input);
-    let mut writer = BufWriter::new(output);
-    zpars::decompress(&mut reader, &mut writer, &DecompressionOptions)?;
-    writer.flush()?;
+    let mut restored = Vec::new();
+    zpars::decompress(&mut reader, &mut restored, &DecompressionOptions)?;
 
-    info!("decompression completed");
+    if !args.raw && restored.starts_with(DIR_WRAP_MAGIC) {
+        let tar_bytes = &restored[DIR_WRAP_MAGIC.len()..];
+        std::fs::create_dir_all(&args.output).with_context(|| {
+            format!(
+                "creating output directory for extracted files {}",
+                args.output.display()
+            )
+        })?;
+        let cursor = Cursor::new(tar_bytes);
+        let mut archive = Archive::new(cursor);
+        archive.unpack(&args.output).with_context(|| {
+            format!("unpacking directory payload into {}", args.output.display())
+        })?;
+        info!(
+            mode = "directory",
+            bytes = tar_bytes.len(),
+            "decompression completed"
+        );
+    } else {
+        let output = File::create(&args.output)
+            .with_context(|| format!("creating output file {}", args.output.display()))?;
+        let mut writer = BufWriter::new(output);
+        writer.write_all(&restored)?;
+        writer.flush()?;
+        info!(
+            mode = "raw",
+            bytes = restored.len(),
+            "decompression completed"
+        );
+    }
+
     Ok(())
 }
 
@@ -281,12 +313,16 @@ fn open_compress_reader(path: &Path) -> Result<Box<dyn Read>> {
             )
         })?;
         let tar_bytes = builder.into_inner()?;
+        let mut wrapped = Vec::with_capacity(DIR_WRAP_MAGIC.len() + tar_bytes.len());
+        wrapped.extend_from_slice(DIR_WRAP_MAGIC);
+        wrapped.extend_from_slice(&tar_bytes);
         info!(
             input = %path.display(),
             tar_bytes = tar_bytes.len(),
-            "directory input packed as tar stream"
+            wrapped_bytes = wrapped.len(),
+            "directory input packed as tagged tar stream"
         );
-        return Ok(Box::new(Cursor::new(tar_bytes)));
+        return Ok(Box::new(Cursor::new(wrapped)));
     }
 
     anyhow::bail!("input path is neither regular file nor directory");

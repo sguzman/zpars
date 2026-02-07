@@ -1,7 +1,6 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
-use std::io::Cursor;
 use tempfile::tempdir;
 
 #[test]
@@ -67,8 +66,7 @@ fn cli_compress_directory_as_tar_stream() {
     let input_dir = dir.path().join("docs");
     let input_file = input_dir.join("a.txt");
     let compressed = dir.path().join("docs.zps");
-    let restored_tar = dir.path().join("docs.tar");
-    let unpack_dir = dir.path().join("unpack");
+    let restore_dir = dir.path().join("restored_docs");
 
     fs::create_dir_all(&input_dir).expect("mkdir");
     fs::write(&input_file, b"hello directory compression").expect("write");
@@ -92,18 +90,13 @@ fn cli_compress_directory_as_tar_stream() {
             "-i",
             compressed.to_str().unwrap(),
             "-o",
-            restored_tar.to_str().unwrap(),
+            restore_dir.to_str().unwrap(),
         ])
         .assert()
         .success();
 
-    fs::create_dir_all(&unpack_dir).expect("mkdir unpack");
-    let tar_bytes = fs::read(&restored_tar).expect("read restored tar");
-    let mut ar = tar::Archive::new(Cursor::new(tar_bytes));
-    ar.unpack(&unpack_dir).expect("unpack tar");
-
-    let restored = fs::read(unpack_dir.join("a.txt"))
-        .or_else(|_| fs::read(unpack_dir.join("./a.txt")))
+    let restored = fs::read(restore_dir.join("a.txt"))
+        .or_else(|_| fs::read(restore_dir.join("./a.txt")))
         .expect("read restored file");
     assert_eq!(restored, b"hello directory compression");
 }
