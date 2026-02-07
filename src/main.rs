@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use tracing::{debug, info};
@@ -61,20 +61,23 @@ struct CompressArgs {
     #[arg(short, long)]
     output: PathBuf,
 
-    #[arg(long, default_value_t = 1 << 20)]
-    block_size: usize,
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=5))]
+    level: Option<u8>,
 
-    #[arg(long, default_value_t = 4)]
-    min_match: usize,
+    #[arg(long)]
+    block_size: Option<usize>,
 
-    #[arg(long, default_value_t = 0)]
-    secondary_match: usize,
+    #[arg(long)]
+    min_match: Option<usize>,
 
-    #[arg(long, default_value_t = 3)]
-    search_log: u8,
+    #[arg(long)]
+    secondary_match: Option<usize>,
 
-    #[arg(long, default_value_t = 20)]
-    table_log: u8,
+    #[arg(long)]
+    search_log: Option<u8>,
+
+    #[arg(long)]
+    table_log: Option<u8>,
 }
 
 #[derive(Debug, Args)]
@@ -125,12 +128,10 @@ fn run_compress(args: &CompressArgs) -> Result<()> {
     let opts = compression_options(args);
     info!(?opts, input = %args.input.display(), output = %args.output.display(), "compression started");
 
-    let input = File::open(&args.input)
-        .with_context(|| format!("opening input file {}", args.input.display()))?;
     let output = File::create(&args.output)
         .with_context(|| format!("creating output file {}", args.output.display()))?;
 
-    let mut reader = BufReader::new(input);
+    let mut reader = open_compress_reader(&args.input)?;
     let mut writer = BufWriter::new(output);
     zpars::compress(&mut reader, &mut writer, &opts)?;
     writer.flush()?;
@@ -193,13 +194,102 @@ fn run_roundtrip(args: &CompressArgs) -> Result<()> {
 }
 
 fn compression_options(args: &CompressArgs) -> CompressionOptions {
-    CompressionOptions {
-        block_size: args.block_size,
-        min_match: args.min_match,
-        secondary_match: args.secondary_match,
-        search_log: args.search_log,
-        table_log: args.table_log,
+    let mut opts = if let Some(level) = args.level {
+        compression_options_for_level(level)
+    } else {
+        CompressionOptions::default()
+    };
+
+    if let Some(v) = args.block_size {
+        opts.block_size = v;
     }
+    if let Some(v) = args.min_match {
+        opts.min_match = v;
+    }
+    if let Some(v) = args.secondary_match {
+        opts.secondary_match = v;
+    }
+    if let Some(v) = args.search_log {
+        opts.search_log = v;
+    }
+    if let Some(v) = args.table_log {
+        opts.table_log = v;
+    }
+
+    opts
+}
+
+fn compression_options_for_level(level: u8) -> CompressionOptions {
+    match level {
+        0 => CompressionOptions {
+            block_size: 1 << 20,
+            min_match: 64,
+            secondary_match: 0,
+            search_log: 0,
+            table_log: 8,
+        },
+        1 => CompressionOptions::default(),
+        2 => CompressionOptions {
+            block_size: 1 << 20,
+            min_match: 4,
+            secondary_match: 6,
+            search_log: 4,
+            table_log: 22,
+        },
+        3 => CompressionOptions {
+            block_size: 1 << 20,
+            min_match: 3,
+            secondary_match: 6,
+            search_log: 5,
+            table_log: 23,
+        },
+        4 => CompressionOptions {
+            block_size: 1 << 20,
+            min_match: 3,
+            secondary_match: 8,
+            search_log: 6,
+            table_log: 24,
+        },
+        5 => CompressionOptions {
+            block_size: 1 << 20,
+            min_match: 3,
+            secondary_match: 12,
+            search_log: 7,
+            table_log: 25,
+        },
+        _ => CompressionOptions::default(),
+    }
+}
+
+fn open_compress_reader(path: &Path) -> Result<Box<dyn Read>> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("reading input metadata {}", path.display()))?;
+
+    if metadata.is_file() {
+        let input =
+            File::open(path).with_context(|| format!("opening input file {}", path.display()))?;
+        return Ok(Box::new(BufReader::new(input)));
+    }
+
+    if metadata.is_dir() {
+        let mut builder = tar::Builder::new(Vec::new());
+        builder.follow_symlinks(false);
+        builder.append_dir_all(".", path).with_context(|| {
+            format!(
+                "packing directory {} into tar stream for compression",
+                path.display()
+            )
+        })?;
+        let tar_bytes = builder.into_inner()?;
+        info!(
+            input = %path.display(),
+            tar_bytes = tar_bytes.len(),
+            "directory input packed as tar stream"
+        );
+        return Ok(Box::new(Cursor::new(tar_bytes)));
+    }
+
+    anyhow::bail!("input path is neither regular file nor directory");
 }
 
 fn init_tracing(cli: &Cli) -> Result<()> {
