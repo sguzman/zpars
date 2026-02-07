@@ -39,6 +39,7 @@ enum Command {
     Decompress(IoArgs),
     Roundtrip(CompressArgs),
     InspectZpaq(InspectArgs),
+    ExtractZpaqM0(ExtractZpaqM0Args),
 }
 
 #[derive(Debug, Args)]
@@ -80,6 +81,15 @@ struct InspectArgs {
     input: PathBuf,
 }
 
+#[derive(Debug, Args)]
+struct ExtractZpaqM0Args {
+    #[arg(short, long)]
+    input: PathBuf,
+
+    #[arg(short, long)]
+    output_dir: PathBuf,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(&cli)?;
@@ -89,6 +99,7 @@ fn main() -> Result<()> {
         Command::Decompress(args) => run_decompress(&args),
         Command::Roundtrip(args) => run_roundtrip(&args),
         Command::InspectZpaq(args) => run_inspect_zpaq(&args),
+        Command::ExtractZpaqM0(args) => run_extract_zpaq_m0(&args),
     }
 }
 
@@ -225,5 +236,38 @@ fn run_inspect_zpaq(args: &InspectArgs) -> Result<()> {
             b.segment_offset
         );
     }
+    Ok(())
+}
+
+fn run_extract_zpaq_m0(args: &ExtractZpaqM0Args) -> Result<()> {
+    let segments = zpars::extract_zpaq_unmodeled_file(&args.input)?;
+    std::fs::create_dir_all(&args.output_dir).with_context(|| {
+        format!(
+            "creating output directory for extracted files {}",
+            args.output_dir.display()
+        )
+    })?;
+
+    for seg in &segments {
+        let name = if seg.filename.is_empty() {
+            format!("block{}_segment.bin", seg.block_index)
+        } else {
+            seg.filename.clone()
+        };
+        let path = args.output_dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, &seg.data)
+            .with_context(|| format!("writing extracted file {}", path.display()))?;
+        info!(
+            block = seg.block_index,
+            file = %path.display(),
+            bytes = seg.data.len(),
+            "extracted segment"
+        );
+    }
+
+    info!(segments = segments.len(), "zpaq -m0 extraction completed");
     Ok(())
 }
