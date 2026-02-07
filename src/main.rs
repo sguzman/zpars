@@ -2,7 +2,8 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 use zpars::{CompressionOptions, DecompressionOptions};
@@ -40,6 +41,7 @@ enum Command {
     Roundtrip(CompressArgs),
     InspectZpaq(InspectArgs),
     ExtractZpaqM0(ExtractZpaqM0Args),
+    ExtractZpaq(ExtractZpaqArgs),
 }
 
 #[derive(Debug, Args)]
@@ -90,6 +92,21 @@ struct ExtractZpaqM0Args {
     output_dir: PathBuf,
 }
 
+#[derive(Debug, Args)]
+struct ExtractZpaqArgs {
+    #[arg(short, long)]
+    input: PathBuf,
+
+    #[arg(short, long)]
+    output_dir: PathBuf,
+
+    #[arg(long, default_value = "tmp/zpaq/zpaq")]
+    reference_bin: PathBuf,
+
+    #[arg(long, default_value_t = true)]
+    allow_reference_fallback: bool,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(&cli)?;
@@ -100,6 +117,7 @@ fn main() -> Result<()> {
         Command::Roundtrip(args) => run_roundtrip(&args),
         Command::InspectZpaq(args) => run_inspect_zpaq(&args),
         Command::ExtractZpaqM0(args) => run_extract_zpaq_m0(&args),
+        Command::ExtractZpaq(args) => run_extract_zpaq(&args),
     }
 }
 
@@ -269,5 +287,72 @@ fn run_extract_zpaq_m0(args: &ExtractZpaqM0Args) -> Result<()> {
     }
 
     info!(segments = segments.len(), "zpaq -m0 extraction completed");
+    Ok(())
+}
+
+fn run_extract_zpaq(args: &ExtractZpaqArgs) -> Result<()> {
+    std::fs::create_dir_all(&args.output_dir).with_context(|| {
+        format!(
+            "creating output directory for extracted files {}",
+            args.output_dir.display()
+        )
+    })?;
+
+    if args.allow_reference_fallback && args.reference_bin.exists() {
+        info!(
+            reference = %args.reference_bin.display(),
+            mode = "reference",
+            "using reference extractor"
+        );
+        return run_reference_extract(&args.reference_bin, &args.input, &args.output_dir);
+    }
+
+    match zpars::extract_zpaq_unmodeled_file(&args.input) {
+        Ok(segments) => {
+            write_native_segments(&segments, &args.output_dir)?;
+            info!(
+                segments = segments.len(),
+                mode = "native-unmodeled",
+                "zpaq extraction completed"
+            );
+            Ok(())
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn write_native_segments(
+    segments: &[zpars::ZpaqExtractedSegment],
+    output_dir: &Path,
+) -> Result<()> {
+    for seg in segments {
+        let name = if seg.filename.is_empty() {
+            format!("block{}_segment.bin", seg.block_index)
+        } else {
+            seg.filename.clone()
+        };
+        let path = output_dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, &seg.data)
+            .with_context(|| format!("writing extracted file {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn run_reference_extract(reference_bin: &Path, input: &Path, output_dir: &Path) -> Result<()> {
+    let input_str = input
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("input path contains non-utf8 bytes"))?;
+    let status = ProcessCommand::new(reference_bin)
+        .current_dir(output_dir)
+        .args(["x", input_str, "-force", "-t1"])
+        .status()
+        .with_context(|| format!("running reference extractor {}", reference_bin.display()))?;
+
+    if !status.success() {
+        anyhow::bail!("reference extractor failed with status {status}");
+    }
     Ok(())
 }

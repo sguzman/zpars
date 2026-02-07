@@ -142,3 +142,39 @@ fn rust_extracts_unmodeled_reference_archive() {
     }
     assert!(found, "no extracted file starts with expected payload");
 }
+
+#[test]
+fn auto_extract_falls_back_for_modeled_archives() {
+    ensure_ref_built();
+
+    let dir = tempdir().expect("tempdir");
+    let src = dir.path().join("src_m1.txt");
+    let archive = dir.path().join("m1.zpaq");
+    let out = dir.path().join("out_m1");
+
+    let payload = b"modeled archive fallback test\n";
+    fs::write(&src, payload).expect("write src");
+
+    let status = StdCommand::new(ref_bin())
+        .current_dir(dir.path())
+        .args(["a", archive.to_str().unwrap(), "src_m1.txt", "-m1", "-t1"])
+        .status()
+        .expect("run zpaq add");
+    assert!(status.success(), "zpaq add failed");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("zpars"))
+        .args([
+            "extract-zpaq",
+            "-i",
+            archive.to_str().unwrap(),
+            "-o",
+            out.to_str().unwrap(),
+            "--reference-bin",
+            ref_bin().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let restored = fs::read(out.join("src_m1.txt")).expect("read restored");
+    assert_eq!(restored, payload);
+}

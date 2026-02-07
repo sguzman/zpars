@@ -68,6 +68,11 @@ pub fn extract_unmodeled_file(path: &Path) -> Result<Vec<ZpaqExtractedSegment>> 
     extract_unmodeled_bytes(&data)
 }
 
+pub fn archive_is_fully_unmodeled_file(path: &Path) -> Result<bool> {
+    let blocks = inspect_file(path)?;
+    Ok(!blocks.is_empty() && blocks.iter().all(|b| b.n_components == 0))
+}
+
 pub fn extract_unmodeled_bytes(data: &[u8]) -> Result<Vec<ZpaqExtractedSegment>> {
     let mut out = Vec::new();
     let mut i = 0usize;
